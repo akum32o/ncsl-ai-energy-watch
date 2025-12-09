@@ -11,12 +11,12 @@ NCSL AI + Energy/Utilities Legislation Watcher
       ONLY if there are new relevant bills.
 - State is tracked in a JSON file in the repo.
 
-Config via environment variables (GitHub Actions secrets are passed as env):
+Env vars (via GitHub Actions secrets):
 
   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
   EMAIL_FROM, EMAIL_TO  (comma-separated list)
   DIGEST_DAYS (optional, default 14)
-  STATE_FILE (optional, default "ncsl_ai_state.json")
+  STATE_FILE  (optional, default "ncsl_ai_state.json")
   FORCE_EMAIL="1" to ignore the 14-day guard and always send a digest.
 """
 
@@ -26,11 +26,10 @@ import json
 import ssl
 import smtplib
 from typing import List, Dict, Set
-from email.mime.text import MIMEText
+from email.mime_text import MIMEText
 from urllib.parse import urljoin
 
 import requests
-import cloudscraper
 from bs4 import BeautifulSoup
 
 PAGE_URL = "https://www.ncsl.org/technology-and-communication/artificial-intelligence-2025-legislation"
@@ -146,30 +145,33 @@ def fetch_html() -> str:
     """
     Fetch the NCSL page HTML.
 
-    First try cloudscraper (handles anti-bot / Cloudflare better).
-    If that still returns non-200, fall back to plain requests once.
-    If all fail, raise a RuntimeError so we can see what's going on.
+    Try cloudscraper if available (better for anti-bot); otherwise use plain
+    requests. If all fail, raise a RuntimeError.
     """
-    scraper = cloudscraper.create_scraper(
-        browser={
-            "browser": "chrome",
-            "platform": "mac",
-            "mobile": False,
-        }
-    )
-    resp = scraper.get(PAGE_URL, headers=HEADERS, timeout=60)
-    if resp.status_code == 200:
-        return resp.text
+    # Try optional cloudscraper
+    scraper = None
+    try:
+        import cloudscraper  # optional dependency
+        scraper = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "mac", "mobile": False}
+        )
+    except ImportError:
+        scraper = None
 
-    # Fallback: try plain requests once
+    if scraper is not None:
+        resp = scraper.get(PAGE_URL, headers=HEADERS, timeout=60)
+        if resp.status_code == 200:
+            return resp.text
+
+    # Fallback to plain requests
     resp2 = requests.get(PAGE_URL, headers=HEADERS, timeout=60)
     if resp2.status_code == 200:
         return resp2.text
 
     raise RuntimeError(
         f"Unable to fetch NCSL page. "
-        f"cloudscraper status={resp.status_code}, "
-        f"requests status={resp2.status_code}"
+        f"cloudscraper_status={getattr(locals().get('resp', None), 'status_code', 'n/a')}, "
+        f"requests_status={resp2.status_code}"
     )
 
 
@@ -341,7 +343,7 @@ def main():
     last_digest = state.get("last_digest", 0)
 
     now = time.time()
-    # 14-day guard (or DIGEST_DAYS) – unless FORCE_EMAIL is set
+    # DIGEST_DAYS guard – unless FORCE_EMAIL is set
     if not FORCE_EMAIL and last_digest:
         if now - last_digest < DIGEST_DAYS * 24 * 3600:
             print(f"Skipping digest: <{DIGEST_DAYS} days since last email.")
