@@ -26,10 +26,11 @@ import json
 import ssl
 import smtplib
 from typing import List, Dict, Set
-from email.mime.text import MIMEText
+from email.mime_text import MIMEText
 from urllib.parse import urljoin
 
 import requests
+import cloudscraper           # <--- NEW
 from bs4 import BeautifulSoup
 
 PAGE_URL = "https://www.ncsl.org/technology-and-communication/artificial-intelligence-2025-legislation"
@@ -46,12 +47,17 @@ EMAIL_TO = [s.strip() for s in os.environ.get("EMAIL_TO", "").split(",") if s.st
 
 FORCE_EMAIL = os.environ.get("FORCE_EMAIL", "0") == "1"
 
+# Pretend to be a normal Chrome browser
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-              "image/avif,image/webp,image/apng,*/*;q=0.8",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.ncsl.org/",
 }
@@ -136,11 +142,42 @@ def save_state(seen_ids: Set[str], last_digest: int):
         json.dump(state, f, indent=2)
 
 
+def fetch_html() -> str:
+    """
+    Fetch the NCSL page HTML.
+
+    First try cloudscraper (handles anti-bot / Cloudflare better).
+    If that still returns 403, fall back to plain requests once.
+    If all fail, raise a RuntimeError so we can see what's going on.
+    """
+    # cloudscraper attempt
+    scraper = cloudscraper.create_scraper(
+        browser={
+            "browser": "chrome",
+            "platform": "mac",
+            "mobile": False,
+        }
+    )
+    resp = scraper.get(PAGE_URL, headers=HEADERS, timeout=60)
+    if resp.status_code == 200:
+        return resp.text
+
+    # Fallback: try plain requests once
+    resp2 = requests.get(PAGE_URL, headers=HEADERS, timeout=60)
+    if resp2.status_code == 200:
+        return resp2.text
+
+    raise RuntimeError(
+        f"Unable to fetch NCSL page. "
+        f"cloudscraper status={resp.status_code}, "
+        f"requests status={resp2.status_code}"
+    )
+
+
 def fetch_table_rows() -> List[Dict]:
     """Scrape the NCSL page and return all rows as dicts."""
-    resp = requests.get(PAGE_URL, headers=HEADERS, timeout=60)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    html = fetch_html()
+    soup = BeautifulSoup(html, "html.parser")
 
     # Find the table with the right headers
     target_table = None
@@ -311,7 +348,13 @@ def main():
             print(f"Skipping digest: <{DIGEST_DAYS} days since last email.")
             return
 
-    all_rows = fetch_table_rows()
+    try:
+        all_rows = fetch_table_rows()
+    except Exception as e:
+        # Log a clear error; you could also email yourself here if you want
+        print(f"[NCSL AI Watch] ERROR fetching table: {e}")
+        return
+
     relevant = filter_relevant(all_rows)
 
     # "New since last digest" = relevant IDs not in seen_ids
