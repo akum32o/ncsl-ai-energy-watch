@@ -30,7 +30,7 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}  # your comma list: Brooke...,Paula..., etc.
           DIGEST_DAYS: "14"
-          # FORCE_EMAIL: "1"   # uncomment temporarily if you want to force a test email
+          FORCE_EMAIL: "1"   # uncomment temporarily if you want to force a test email
         run: python ncsl_ai_energy_watch.py
 
       - name: Persist state
