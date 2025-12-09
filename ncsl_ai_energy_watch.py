@@ -11,12 +11,12 @@ NCSL AI + Energy/Utilities Legislation Watcher
       ONLY if there are new relevant bills.
 - State is tracked in a JSON file in the repo.
 
-Env vars (via GitHub Actions secrets):
+Config via environment variables (GitHub Actions secrets are passed as env):
 
   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
   EMAIL_FROM, EMAIL_TO  (comma-separated list)
   DIGEST_DAYS (optional, default 14)
-  STATE_FILE  (optional, default "ncsl_ai_state.json")
+  STATE_FILE (optional, default "ncsl_ai_state.json")
   FORCE_EMAIL="1" to ignore the 14-day guard and always send a digest.
 """
 
@@ -32,6 +32,15 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+try:
+    import cloudscraper  # type: ignore
+except ImportError:
+    cloudscraper = None  # we’ll handle this gracefully
+
+# --------------------------------------------------------------------
+# Constants / config
+# --------------------------------------------------------------------
+
 PAGE_URL = "https://www.ncsl.org/technology-and-communication/artificial-intelligence-2025-legislation"
 
 STATE_FILE = os.environ.get("STATE_FILE", "ncsl_ai_state.json")
@@ -46,13 +55,15 @@ EMAIL_TO = [s.strip() for s in os.environ.get("EMAIL_TO", "").split(",") if s.st
 
 FORCE_EMAIL = os.environ.get("FORCE_EMAIL", "0") == "1"
 
-# Pretend to be a normal Chrome browser
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
+# A few realistic desktop Chrome user-agents to rotate between
+USER_AGENTS = [
+    # macOS
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    # Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+]
+
+BASE_HEADERS = {
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,image/apng,*/*;q=0.8"
@@ -60,6 +71,11 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.ncsl.org/",
 }
+
+def make_headers(ua: str) -> Dict[str, str]:
+    h = dict(BASE_HEADERS)
+    h["User-Agent"] = ua
+    return h
 
 # For grouping in the email
 NE_PLUS_NY = [
@@ -121,6 +137,9 @@ ALL_KEYWORDS = (
     CLIMATE_POLICY
 )
 
+# --------------------------------------------------------------------
+# State helpers
+# --------------------------------------------------------------------
 
 def load_state() -> Dict:
     if os.path.exists(STATE_FILE):
@@ -140,38 +159,57 @@ def save_state(seen_ids: Set[str], last_digest: int):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
+# --------------------------------------------------------------------
+# Fetch + parse
+# --------------------------------------------------------------------
 
 def fetch_html() -> str:
     """
     Fetch the NCSL page HTML.
 
-    Try cloudscraper if available (better for anti-bot); otherwise use plain
-    requests. If all fail, raise a RuntimeError.
+    Strategy:
+    1. If cloudscraper is available, try it with multiple UAs.
+    2. Fallback to plain requests with the same UAs.
+    3. If all fail, raise with diagnostic status codes.
     """
-    # Try optional cloudscraper
-    scraper = None
-    try:
-        import cloudscraper  # optional dependency
-        scraper = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "mac", "mobile": False}
-        )
-    except ImportError:
-        scraper = None
+    cloudscraper_status = "n/a"
+    requests_status = "n/a"
+    last_err: Exception | None = None
 
-    if scraper is not None:
-        resp = scraper.get(PAGE_URL, headers=HEADERS, timeout=60)
-        if resp.status_code == 200:
-            return resp.text
+    # 1) cloudscraper, if installed
+    if cloudscraper is not None:
+        for ua in USER_AGENTS:
+            try:
+                scraper = cloudscraper.create_scraper(
+                    browser={
+                        "browser": "chrome",
+                        "platform": "windows",
+                        "mobile": False,
+                    }
+                )
+                resp = scraper.get(PAGE_URL, headers=make_headers(ua), timeout=60)
+                cloudscraper_status = resp.status_code
+                if resp.status_code == 200:
+                    return resp.text
+                # if it's a hard 403/429, try next UA
+            except Exception as e:
+                last_err = e
 
-    # Fallback to plain requests
-    resp2 = requests.get(PAGE_URL, headers=HEADERS, timeout=60)
-    if resp2.status_code == 200:
-        return resp2.text
+    # 2) plain requests
+    for ua in USER_AGENTS:
+        try:
+            resp = requests.get(PAGE_URL, headers=make_headers(ua), timeout=60)
+            requests_status = resp.status_code
+            if resp.status_code == 200:
+                return resp.text
+        except Exception as e:
+            last_err = e
 
     raise RuntimeError(
         f"Unable to fetch NCSL page. "
-        f"cloudscraper_status={getattr(locals().get('resp', None), 'status_code', 'n/a')}, "
-        f"requests_status={resp2.status_code}"
+        f"cloudscraper_status={cloudscraper_status}, "
+        f"requests_status={requests_status}, "
+        f"last_error={last_err}"
     )
 
 
@@ -192,7 +230,7 @@ def fetch_table_rows() -> List[Dict]:
         raise RuntimeError("Could not locate legislation table on NCSL page")
 
     tbody = target_table.find("tbody") or target_table
-    rows = []
+    rows: List[Dict] = []
     for tr in tbody.find_all("tr"):
         cells = tr.find_all("td")
         if len(cells) < 6:
@@ -226,9 +264,12 @@ def fetch_table_rows() -> List[Dict]:
 
     return rows
 
+# --------------------------------------------------------------------
+# Filtering + formatting
+# --------------------------------------------------------------------
 
 def is_energy_relevant(row: Dict) -> bool:
-    """Check bill title + summary + category for any energy/utility/data-center/consumer/climate relevance."""
+    """Check title + summary + category for energy/utility/data-center/consumer/climate relevance."""
     text = " ".join(
         [
             row.get("title", ""),
@@ -240,7 +281,6 @@ def is_energy_relevant(row: Dict) -> bool:
     for kw in ALL_KEYWORDS:
         if kw.lower() in text:
             return True
-
     return False
 
 
@@ -250,7 +290,7 @@ def filter_relevant(rows: List[Dict]) -> List[Dict]:
 
 def group_by_state(new_rows: List[Dict]):
     """Split new rows into {NE+NY states} and {other states}, each mapping state -> list[rows]."""
-    top = {s: [] for s in NE_PLUS_NY}
+    top: Dict[str, List[Dict]] = {s: [] for s in NE_PLUS_NY}
     others: Dict[str, List[Dict]] = {}
 
     for r in new_rows:
@@ -319,6 +359,9 @@ def format_email(new_rows: List[Dict], last_digest_ts: int) -> str:
 
     return "\n".join(lines)
 
+# --------------------------------------------------------------------
+# Email
+# --------------------------------------------------------------------
 
 def send_email(subject: str, body: str):
     if not (SMTP_HOST and SMTP_USER and SMTP_PASS and EMAIL_TO):
@@ -336,6 +379,9 @@ def send_email(subject: str, body: str):
         server.login(SMTP_USER, SMTP_PASS)
         server.sendmail(msg["From"], EMAIL_TO, msg.as_string())
 
+# --------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------
 
 def main():
     state = load_state()
@@ -343,7 +389,8 @@ def main():
     last_digest = state.get("last_digest", 0)
 
     now = time.time()
-    # DIGEST_DAYS guard – unless FORCE_EMAIL is set
+
+    # 14-day guard (or DIGEST_DAYS) – unless FORCE_EMAIL is set
     if not FORCE_EMAIL and last_digest:
         if now - last_digest < DIGEST_DAYS * 24 * 3600:
             print(f"Skipping digest: <{DIGEST_DAYS} days since last email.")
@@ -352,6 +399,7 @@ def main():
     try:
         all_rows = fetch_table_rows()
     except Exception as e:
+        # Log a clear error; you could also email yourself here if you want
         print(f"[NCSL AI Watch] ERROR fetching table: {e}")
         return
 
