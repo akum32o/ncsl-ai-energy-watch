@@ -2,63 +2,114 @@
 """
 NCSL AI + Energy/Utilities Legislation Watcher
 
-- Scrapes the 2025 AI legislation table from NCSL
-- Filters for bills related to energy, utilities, and consumers
-- Emails any *new or changed* relevant bills since the last digest
+- Scrapes the 2025 AI legislation table:
+  https://www.ncsl.org/technology-and-communication/artificial-intelligence-2025-legislation
+- Filters to bills relevant to energy/utilities / grid / data centers.
+- Every run:
+    * If < DIGEST_DAYS since last email digest -> exit silently.
+    * Otherwise, compute "new since last digest" and send an email
+      ONLY if there are new relevant bills.
+- State is tracked in a JSON file in the repo.
 
-Config is via environment variables (for SMTP + recipients), so nothing
-sensitive is hard-coded. Designed to be run via GitHub Actions on a schedule.
+Config via environment variables (GitHub Actions secrets are passed as env):
+
+  SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
+  EMAIL_FROM, EMAIL_TO  (comma-separated list)
+  DIGEST_DAYS (optional, default 14)
+  STATE_FILE (optional, default "ncsl_ai_state.json")
+  FORCE_EMAIL="1" to ignore the 14-day guard and always send a digest.
 """
 
-import os, json, time, smtplib, ssl
-from typing import List, Dict, Tuple
-from email.mime.text import MIMEText
+import os
+import time
+import json
+import ssl
+import smtplib
+from typing import List, Dict, Set
+from email.mime_text import MIMEText
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
-NCSL_URL = "https://www.ncsl.org/technology-and-communication/artificial-intelligence-2025-legislation"
-STATE_FILE = os.environ.get("NCSL_STATE_FILE", "ncsl_ai_energy_state.json")
+PAGE_URL = "https://www.ncsl.org/technology-and-communication/artificial-intelligence-2025-legislation"
 
-# ---- Email / SMTP config (reuses same style as your CSC script) ----
+STATE_FILE = os.environ.get("STATE_FILE", "ncsl_ai_state.json")
+DIGEST_DAYS = int(os.environ.get("DIGEST_DAYS", "14"))
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.office365.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER")         # e.g., "anubhav.kumaria@ct.gov"
+SMTP_USER = os.environ.get("SMTP_USER")
 SMTP_PASS = os.environ.get("SMTP_PASS")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", SMTP_USER)
 EMAIL_TO = [s.strip() for s in os.environ.get("EMAIL_TO", "").split(",") if s.strip()]
 
-# Optional: if you want to force a digest even if nothing changed
 FORCE_EMAIL = os.environ.get("FORCE_EMAIL", "0") == "1"
 
 HEADERS = {
     "User-Agent": "NCSL-AI-Energy-Watch/1.0 (contact: {})".format(EMAIL_FROM or "noreply@example.com")
 }
 
-# ---- Filtering logic ----
-# These are deliberately a bit broad; tweak as you see what comes through.
-
-ENERGY_WORDS = [
-    "energy", "electric", "electricity", "power", "grid",
-    "generation", "nuclear", "solar", "wind", "renewable",
-    "transmission", "distribution", "microgrid", "demand response",
-    "load", "capacity", "efficiency"
+# For grouping in the email
+NE_PLUS_NY = [
+    "Connecticut",
+    "Maine",
+    "Massachusetts",
+    "New Hampshire",
+    "Rhode Island",
+    "Vermont",
+    "New York",
 ]
 
-UTILITY_WORDS = [
-    "utility", "utilities", "public utility", "public utilities",
-    "ratepayer", "rate payers", "ratepayer", "rates", "billing",
-    "natural gas", "gas utility", "water utility", "telecommunications",
-    "regulated utility"
+# =======================
+# OCC-TUNED KEYWORD GROUPS
+# =======================
+
+CORE_UTILITY = [
+    "energy", "electric", "electricity", "utility", "utilities",
+    "grid", "transmission", "distribution",
+    "ratepayer", "rate payers", "ratemaking", "rate-making",
+    "power plant", "power generation",
+    "renewable", "solar", "wind",
+    "battery", "storage", "energy storage",
+    "microgrid", "micro-grid",
+    "interconnection",
 ]
 
-CONSUMER_WORDS = [
-    "consumer", "customers", "customer", "data privacy",
-    "privacy", "profiling", "disclosure", "notification",
-    "fraud", "scam", "deceptive", "harassment"
+DATA_CENTER_INFRA = [
+    "data center", "data centres", "data-center",
+    "artificial intelligence infrastructure", "ai infrastructure",
+    "compute infrastructure", "server farm",
+    "high-performance computing", "hpc",
+    "large load", "load growth", "peak load", "demand growth",
+    "grid reliability", "capacity planning",
+    "electric demand", "megawatt", "mw",
 ]
+
+CONSUMER_PROTECTION = [
+    "consumer protection", "consumer rights",
+    "algorithmic pricing",
+    "algorithmic decision-making", "automated decision making",
+    "billing transparency",
+    "public utility commission", "utility commission",
+    "regulator", "regulation",
+    "rate case", "tariff",
+]
+
+CLIMATE_POLICY = [
+    "emissions", "carbon", "greenhouse gas", "ghg",
+    "climate", "decarbonization", "electrification",
+    "building performance", "energy efficiency",
+    "demand response",
+]
+
+ALL_KEYWORDS = (
+    CORE_UTILITY +
+    DATA_CENTER_INFRA +
+    CONSUMER_PROTECTION +
+    CLIMATE_POLICY
+)
+
 
 def load_state() -> Dict:
     if os.path.exists(STATE_FILE):
@@ -67,125 +118,167 @@ def load_state() -> Dict:
                 return json.load(f)
         except json.JSONDecodeError:
             pass
-    return {"bills": {}, "last_digest": 0}
+    return {"seen_ids": [], "last_digest": 0}
 
-def save_state(bills_snapshot: Dict[str, Dict]):
+
+def save_state(seen_ids: Set[str], last_digest: int):
     state = {
-        "bills": bills_snapshot,
-        "last_digest": int(time.time()),
+        "seen_ids": sorted(seen_ids),
+        "last_digest": int(last_digest),
     }
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-def fetch_all_bills() -> List[Dict]:
-    """Scrape the NCSL table and return all rows as structured dicts."""
-    resp = requests.get(NCSL_URL, headers=HEADERS, timeout=60)
+
+def fetch_table_rows() -> List[Dict]:
+    """Scrape the NCSL page and return all rows as dicts."""
+    resp = requests.get(PAGE_URL, headers=HEADERS, timeout=60)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    rows = soup.select("table tbody tr")
-    bills = []
+    # Find the table with the right headers
+    target_table = None
+    for table in soup.find_all("table"):
+        headers = [th.get_text(strip=True) for th in table.find_all("th")]
+        if "Jurisdiction and Summary" in headers and "Bill Number" in headers:
+            target_table = table
+            break
 
-    for row in rows:
-        cells = row.find_all("td")
-        if len(cells) < 5:
+    if not target_table:
+        raise RuntimeError("Could not locate legislation table on NCSL page")
+
+    tbody = target_table.find("tbody") or target_table
+    rows = []
+    for tr in tbody.find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 6:
             continue
 
-        jurisdiction = cells[0].get_text(" ", strip=True)
-
+        jurisdiction = cells[0].get_text(strip=True)
         bill_cell = cells[1]
-        bill_number = bill_cell.get_text(" ", strip=True)
-        link_tag = bill_cell.find("a")
-        bill_url = urljoin(NCSL_URL, link_tag["href"]) if link_tag and link_tag.get("href") else NCSL_URL
+        link = bill_cell.find("a")
+        bill_number = link.get_text(strip=True) if link else bill_cell.get_text(strip=True)
+        bill_url = urljoin(PAGE_URL, link["href"]) if link and link.get("href") else PAGE_URL
 
-        title = cells[2].get_text(" ", strip=True)
-        status = cells[3].get_text(" ", strip=True)
-        category = cells[4].get_text(" ", strip=True)
+        title = cells[2].get_text(strip=True)
+        status = cells[3].get_text(strip=True)
+        summary = cells[4].get_text(" ", strip=True)
+        category = cells[5].get_text(strip=True)
 
         bill_id = f"{jurisdiction}::{bill_number}"
 
-        bills.append({
-            "id": bill_id,
-            "jurisdiction": jurisdiction,
-            "bill_number": bill_number,
-            "title": title,
-            "status": status,
-            "category": category,
-            "url": bill_url,
-        })
+        rows.append(
+            {
+                "id": bill_id,
+                "state": jurisdiction,
+                "bill_number": bill_number,
+                "title": title,
+                "status": status,
+                "summary": summary,
+                "category": category,
+                "url": bill_url,
+            }
+        )
 
-    return bills
+    return rows
 
-def is_relevant(bill: Dict) -> bool:
-    """Return True if the bill looks energy/utility/consumer-relevant."""
-    haystack = " ".join([
-        bill.get("title", ""),
-        bill.get("category", ""),
-    ]).lower()
 
-    def any_word(words):
-        return any(w in haystack for w in words)
+def is_energy_relevant(row: Dict) -> bool:
+    """Check bill title + summary + category for any energy/utility/data-center/consumer/climate relevance."""
+    text = " ".join(
+        [
+            row.get("title", ""),
+            row.get("summary", ""),
+            row.get("category", ""),
+        ]
+    ).lower()
 
-    # We’re already on the AI page, so everything is AI-related.
-    # Filter down to AI x (energy OR utilities OR consumers).
-    if any_word(ENERGY_WORDS) or any_word(UTILITY_WORDS):
-        return True
-
-    # Consumer-only triggers (privacy, profiling) could be relevant for OCC
-    if any_word(CONSUMER_WORDS):
-        return True
+    for kw in ALL_KEYWORDS:
+        if kw.lower() in text:
+            return True
 
     return False
 
-def filter_relevant(bills: List[Dict]) -> List[Dict]:
-    return [b for b in bills if is_relevant(b)]
 
-def diff_against_state(relevant: List[Dict], state: Dict) -> Tuple[List[Dict], Dict[str, Dict]]:
-    """Return (new_or_updated_bills, new_snapshot_dict)."""
-    prev = state.get("bills", {})
-    snapshot: Dict[str, Dict] = {}
-    changed: List[Dict] = []
+def filter_relevant(rows: List[Dict]) -> List[Dict]:
+    return [r for r in rows if is_energy_relevant(r)]
 
-    for b in relevant:
-        meta = {
-            "title": b["title"],
-            "status": b["status"],
-            "category": b["category"],
-            "url": b["url"],
-        }
-        snapshot[b["id"]] = meta
 
-        if b["id"] not in prev or prev[b["id"]] != meta:
-            changed.append(b)
+def group_by_state(new_rows: List[Dict]):
+    """Split new rows into {NE+NY states} and {other states}, each mapping state -> list[rows]."""
+    top = {s: [] for s in NE_PLUS_NY}
+    others = {}
 
-    return changed, snapshot
+    for r in new_rows:
+        state = r["state"]
+        if state in top:
+            top[state].append(r)
+        else:
+            others.setdefault(state, []).append(r)
 
-def format_email(changed: List[Dict], total_relevant: int) -> str:
+    # Drop empty states from "top"
+    top = {s: bills for s, bills in top.items() if bills}
+    return top, others
+
+
+def format_email(new_rows: List[Dict], last_digest_ts: int) -> str:
     lines = []
-    lines.append("NCSL — AI + Energy/Utilities Legislation Digest")
-    lines.append(NCSL_URL)
-    lines.append("")
-    lines.append(f"Total relevant AI+energy/utility bills on NCSL: {total_relevant}")
+    lines.append("NCSL – Artificial Intelligence 2025 Legislation (Energy / Utilities Focus)")
+    lines.append(PAGE_URL)
     lines.append("")
 
-    if changed:
-        lines.append(f"New or updated relevant bills since last digest ({len(changed)}):")
-        lines.append("")
-        for b in changed:
-            lines.append(f"- {b['jurisdiction']} {b['bill_number']} — {b['title']}")
-            lines.append(f"  Status: {b['status']}")
-            lines.append(f"  Category: {b['category']}")
-            lines.append(f"  Link: {b['url']}")
-            lines.append("")
+    if last_digest_ts:
+        last_str = time.strftime("%Y-%m-%d", time.localtime(last_digest_ts))
+        lines.append(f"This digest includes bills NEW since the last email on {last_str}.")
     else:
-        lines.append("No new or updated relevant bills since the last digest.")
+        lines.append("This is the first digest; all listed bills are treated as new.")
+    lines.append("")
+
+    lines.append(f"New relevant bills this digest: {len(new_rows)}")
+    lines.append("")
+
+    if not new_rows:
+        lines.append("No new relevant bills since the last digest.")
+        return "\n".join(lines)
+
+    top, others = group_by_state(new_rows)
+
+    # New England + New York section
+    if top:
+        lines.append("=== New England + New York ===")
+        for state in NE_PLUS_NY:
+            bills = top.get(state)
+            if not bills:
+                continue
+            lines.append("")
+            lines.append(state)
+            lines.append("-" * len(state))
+            for b in bills:
+                lines.append(f"* {b['bill_number']} – {b['title']} ({b['status']})")
+                lines.append(f"  {b['summary']}")
+                lines.append(f"  {b['url']}")
+        lines.append("")
+
+    # Other states section
+    if others:
+        lines.append("=== Other States ===")
+        for state in sorted(others.keys()):
+            bills = others[state]
+            lines.append("")
+            lines.append(state)
+            lines.append("-" * len(state))
+            for b in bills:
+                lines.append(f"* {b['bill_number']} – {b['title']} ({b['status']})")
+                lines.append(f"  {b['summary']}")
+                lines.append(f"  {b['url']}")
         lines.append("")
 
     return "\n".join(lines)
 
+
 def send_email(subject: str, body: str):
     if not (SMTP_HOST and SMTP_USER and SMTP_PASS and EMAIL_TO):
-        print("Email not configured (missing SMTP_* or EMAIL_TO). Skipping email send.")
+        print("Email not configured (missing SMTP_* or EMAIL_TO). Skipping send.")
         return
 
     msg = MIMEText(body, "plain", "utf-8")
@@ -193,30 +286,46 @@ def send_email(subject: str, body: str):
     msg["From"] = EMAIL_FROM or SMTP_USER
     msg["To"] = ", ".join(EMAIL_TO)
 
-    context = ssl.create_default_context()
+    ctx = ssl.create_default_context()
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=60) as server:
-        server.starttls(context=context)
+        server.starttls(context=ctx)
         server.login(SMTP_USER, SMTP_PASS)
         server.sendmail(msg["From"], EMAIL_TO, msg.as_string())
 
+
 def main():
     state = load_state()
-    all_bills = fetch_all_bills()
-    relevant = filter_relevant(all_bills)
+    seen_ids = set(state.get("seen_ids", []))
+    last_digest = state.get("last_digest", 0)
 
-    changed, snapshot = diff_against_state(relevant, state)
+    now = time.time()
+    # 14-day guard (or DIGEST_DAYS) – unless FORCE_EMAIL is set
+    if not FORCE_EMAIL and last_digest:
+        if now - last_digest < DIGEST_DAYS * 24 * 3600:
+            print(f"Skipping digest: <{DIGEST_DAYS} days since last email.")
+            return
 
-    if changed or FORCE_EMAIL:
-        subject_suffix = f"{len(changed)} new/updated" if changed else "No changes (forced digest)"
-        subject = f"[NCSL AI Energy Watch] {subject_suffix}"
-        body = format_email(changed, total_relevant=len(relevant))
-        print(body)
-        send_email(subject, body)
-        save_state(snapshot)
-    else:
-        print("No new or updated relevant bills; not sending email.")
-        # Still update state, in case NCSL quietly changes descriptions/status
-        save_state(snapshot)
+    all_rows = fetch_table_rows()
+    relevant = filter_relevant(all_rows)
+
+    # "New since last digest" = relevant IDs not in seen_ids
+    new_rows = [r for r in relevant if r["id"] not in seen_ids]
+
+    if not new_rows and not FORCE_EMAIL:
+        print("No new relevant bills since last digest; not sending email.")
+        return
+
+    subject_suffix = f"{len(new_rows)} new bill(s)" if new_rows else "Digest (no new bills)"
+    subject = f"[NCSL AI+Energy Watch] {subject_suffix}"
+
+    body = format_email(new_rows, last_digest)
+    print(body)
+    send_email(subject, body)
+
+    # Update state ONLY when a digest is actually sent
+    new_seen = seen_ids.union(r["id"] for r in relevant)
+    save_state(new_seen, now)
+
 
 if __name__ == "__main__":
     main()
