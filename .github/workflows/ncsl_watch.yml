@@ -1,0 +1,42 @@
+name: NCSL AI Energy Watch (14d digest)
+
+on:
+  schedule:
+    - cron: "0 14 * * *"  # every day at 14:00 UTC (~9:00 AM ET)
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Run watcher
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}  # your comma list: Brooke...,Paula..., etc.
+          DIGEST_DAYS: "14"
+          # FORCE_EMAIL: "1"   # uncomment temporarily if you want to force a test email
+        run: python ncsl_ai_energy_watch.py
+
+      - name: Persist state
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git add ncsl_ai_state.json || true
+          git commit -m "Update NCSL watch state" || echo "No changes"
+          git push || echo "No changes to push"
