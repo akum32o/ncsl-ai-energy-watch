@@ -30,7 +30,7 @@ from email.mime.text import MIMEText
 from urllib.parse import urljoin
 
 import requests
-import cloudscraper           # <--- NEW
+import cloudscraper
 from bs4 import BeautifulSoup
 
 PAGE_URL = "https://www.ncsl.org/technology-and-communication/artificial-intelligence-2025-legislation"
@@ -147,10 +147,9 @@ def fetch_html() -> str:
     Fetch the NCSL page HTML.
 
     First try cloudscraper (handles anti-bot / Cloudflare better).
-    If that still returns 403, fall back to plain requests once.
+    If that still returns non-200, fall back to plain requests once.
     If all fail, raise a RuntimeError so we can see what's going on.
     """
-    # cloudscraper attempt
     scraper = cloudscraper.create_scraper(
         browser={
             "browser": "chrome",
@@ -179,7 +178,7 @@ def fetch_table_rows() -> List[Dict]:
     html = fetch_html()
     soup = BeautifulSoup(html, "html.parser")
 
-    # Find the table with the right headers
+    # Find table with correct headers
     target_table = None
     for table in soup.find_all("table"):
         headers = [th.get_text(strip=True) for th in table.find_all("th")]
@@ -250,7 +249,7 @@ def filter_relevant(rows: List[Dict]) -> List[Dict]:
 def group_by_state(new_rows: List[Dict]):
     """Split new rows into {NE+NY states} and {other states}, each mapping state -> list[rows]."""
     top = {s: [] for s in NE_PLUS_NY}
-    others = {}
+    others: Dict[str, List[Dict]] = {}
 
     for r in new_rows:
         state = r["state"]
@@ -265,7 +264,7 @@ def group_by_state(new_rows: List[Dict]):
 
 
 def format_email(new_rows: List[Dict], last_digest_ts: int) -> str:
-    lines = []
+    lines: List[str] = []
     lines.append("NCSL – Artificial Intelligence 2025 Legislation (Energy / Utilities Focus)")
     lines.append(PAGE_URL)
     lines.append("")
@@ -351,7 +350,6 @@ def main():
     try:
         all_rows = fetch_table_rows()
     except Exception as e:
-        # Log a clear error; you could also email yourself here if you want
         print(f"[NCSL AI Watch] ERROR fetching table: {e}")
         return
 
