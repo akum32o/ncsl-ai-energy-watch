@@ -26,7 +26,7 @@ import json
 import ssl
 import smtplib
 from typing import List, Dict, Set
-from email.mime_text import MIMEText
+from email.mimeitext import MIMEText
 from urllib.parse import urljoin
 
 import requests
