@@ -47,7 +47,15 @@ EMAIL_TO = [s.strip() for s in os.environ.get("EMAIL_TO", "").split(",") if s.st
 FORCE_EMAIL = os.environ.get("FORCE_EMAIL", "0") == "1"
 
 HEADERS = {
-    "User-Agent": "NCSL-AI-Energy-Watch/1.0 (contact: {})".format(EMAIL_FROM or "noreply@example.com")
+    # Pretend to be a normal Chrome browser
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.ncsl.org/",
 }
 
 # For grouping in the email
