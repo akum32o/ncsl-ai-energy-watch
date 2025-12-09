@@ -8,18 +8,16 @@ on:
 jobs:
   run:
     runs-on: [self-hosted, macOS, X64]
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      # Removed setup-python because it fails on macOS self-hosted runners
 
       - name: Install deps
         run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          python3 -m pip install --upgrade pip
+          python3 -m pip install requests beautifulsoup4
 
       - name: Run watcher
         env:
@@ -28,10 +26,10 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}  # your comma list: Brooke...,Paula..., etc.
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           DIGEST_DAYS: "14"
-          FORCE_EMAIL: "1"   # uncomment temporarily if you want to force a test email
-        run: python ncsl_ai_energy_watch.py
+          FORCE_EMAIL: "1"   # temporarily forces email for testing
+        run: python3 ncsl_ai_energy_watch.py
 
       - name: Persist state
         run: |
