@@ -7,7 +7,7 @@ on:
 
 jobs:
   run:
-    runs-on: [self-hosted, mac-ncsl]
+    runs-on: [self-hosted, macOS, X64]
     steps:
       - uses: actions/checkout@v4
 
