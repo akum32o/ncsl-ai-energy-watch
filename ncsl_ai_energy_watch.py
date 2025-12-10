@@ -159,6 +159,7 @@ def save_state(seen_ids: Set[str], last_digest: int):
         "seen_ids": sorted(seen_ids),
         "last_digest": int(last_digest),
     }
+    print(f"[STATE] Writing state to {STATE_FILE}")
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
