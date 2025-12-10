@@ -28,7 +28,7 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           DIGEST_DAYS: "14"
-          FORCE_EMAIL: "1"   # temporarily forces email for testing
+          # FORCE_EMAIL: "1"   # temporarily forces email for testing
         run: python3 ncsl_ai_energy_watch.py
 
       - name: Persist state
