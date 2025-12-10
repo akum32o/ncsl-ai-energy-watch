@@ -43,7 +43,10 @@ except ImportError:
 
 PAGE_URL = "https://www.ncsl.org/technology-and-communication/artificial-intelligence-2025-legislation"
 
-STATE_FILE = os.environ.get("STATE_FILE", "ncsl_ai_state.json")
+# Always store state JSON next to this script, so GitHub can commit it
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.environ.get("STATE_FILE", os.path.join(BASE_DIR, "ncsl_ai_state.json"))
+
 DIGEST_DAYS = int(os.environ.get("DIGEST_DAYS", "14"))
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.office365.com")
