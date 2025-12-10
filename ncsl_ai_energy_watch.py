@@ -25,7 +25,7 @@ import time
 import json
 import ssl
 import smtplib
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 from email.mime.text import MIMEText
 from urllib.parse import urljoin
 
@@ -178,7 +178,7 @@ def fetch_html() -> str:
     """
     cloudscraper_status = "n/a"
     requests_status = "n/a"
-    last_err: Exception | None = None
+    last_err: Optional[Exception] = None
 
     # 1) cloudscraper, if installed
     if cloudscraper is not None:
