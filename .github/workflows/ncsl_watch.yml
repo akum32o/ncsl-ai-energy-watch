@@ -5,6 +5,9 @@ on:
     - cron: "0 14 * * *"
   workflow_dispatch: {}
 
+permissions:
+  contents: write   # 👈 this is required for git push
+
 jobs:
   run:
     runs-on: [self-hosted, macOS, X64]
