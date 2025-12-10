@@ -34,7 +34,7 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: "anubhav.kumaria@ct.gov"
           DIGEST_DAYS: "14"
-          FORCE_EMAIL: "1"     # <--- uncomment this ONLY when testing
+         # FORCE_EMAIL: "1"     # <--- uncomment this ONLY when testing
         run: python3 ncsl_ai_energy_watch.py
 
       - name: Persist state
