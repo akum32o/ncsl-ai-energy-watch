@@ -32,7 +32,7 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO: "anubhav.kumaria@ct.gov"
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           DIGEST_DAYS: "14"
          # FORCE_EMAIL: "1"     # <--- uncomment this ONLY when testing
         run: python3 ncsl_ai_energy_watch.py
